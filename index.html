@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hand Gesture AR Game</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  body{background:#000;width:100vw;height:100vh;overflow:hidden;font-family:'Space Grotesk',sans-serif;}
+  #scene{position:relative;width:100%;height:100%;}
+  #video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);z-index:1;}
+  #skeleton-canvas{position:absolute;inset:0;width:100%;height:100%;z-index:2;pointer-events:none;}
+  .fall-object{position:absolute;z-index:3;pointer-events:none;object-fit:contain;}
+
+  #game-hud{
+    position:absolute;top:0;left:0;right:0;z-index:10;
+    display:flex;justify-content:space-between;align-items:flex-start;
+    padding:16px 20px;pointer-events:none;
+    background:linear-gradient(to bottom, rgba(0,0,0,.6) 0%, transparent 100%);
+  }
+  .hud-box{
+    background:rgba(10,14,26,.6);border:1px solid rgba(0,212,255,.3);
+    border-radius:10px;padding:8px 16px;color:#fff;text-align:center;min-width:110px;
+    backdrop-filter:blur(4px);
+  }
+  .hud-label{font-size:10px;letter-spacing:.1em;color:#00d4ff;text-transform:uppercase;font-weight:700;}
+  .hud-value{font-size:22px;font-weight:700;margin-top:2px;}
+  #timer-box.warn .hud-value{color:#ff4d6d;animation:blinkTimer .6s infinite;}
+  @keyframes blinkTimer{0%,100%{opacity:1}50%{opacity:.35}}
+
+  #start-screen{
+    position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;background:rgba(10,14,26,.94);gap:18px;
+  }
+  #start-screen p{color:rgba(255,255,255,.6);font-size:14px;}
+  #start-screen h1{color:#fff;font-size:28px;letter-spacing:.03em;}
+  #start-btn{
+    background:linear-gradient(135deg,#00d4ff,#7b8cde);border:none;border-radius:12px;
+    color:#0a0e1a;font-size:16px;font-weight:700;padding:16px 44px;cursor:pointer;transition:opacity .2s;
+  }
+  #start-btn:hover{opacity:.85;}
+
+  #gameover-screen{
+    position:absolute;inset:0;z-index:60;display:none;flex-direction:column;
+    align-items:center;justify-content:center;background:rgba(10,14,26,.94);gap:14px;
+  }
+  #gameover-screen h1{color:#ff4d6d;font-size:32px;}
+  #gameover-screen .final-score{color:#00d4ff;font-size:48px;font-weight:700;}
+  #retry-btn{
+    background:linear-gradient(135deg,#00d4ff,#7b8cde);border:none;border-radius:12px;
+    color:#0a0e1a;font-size:16px;font-weight:700;padding:14px 38px;cursor:pointer;
+  }
+
+  #no-camera{
+    position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    z-index:20;background:#0a0e1a;color:rgba(255,255,255,.4);font-size:14px;gap:12px;
+  }
+  #hud-status{position:absolute;bottom:10px;left:12px;font-size:11px;color:rgba(255,255,255,.4);z-index:10;}
+</style>
+</head>
+<body>
+<div id="scene">
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="skeleton-canvas"></canvas>
+
+  <div id="game-hud">
+    <div class="hud-box" id="score-box">
+      <div class="hud-label">Score</div>
+      <div class="hud-value" id="score-val">0</div>
+    </div>
+    <div class="hud-box" id="timer-box">
+      <div class="hud-label">Time</div>
+      <div class="hud-value" id="timer-val">--</div>
+    </div>
+    <div class="hud-box" id="buff-box">
+      <div class="hud-label">Speed Bonus</div>
+      <div class="hud-value" id="buff-val">+0.0</div>
+    </div>
+  </div>
+
+  <div id="hud-status">初期化中...</div>
+
+  <div id="no-camera">
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>
+    </svg>
+    <p>カメラを初期化中...</p>
+  </div>
+
+  <div id="start-screen">
+    <h1>POSE CATCH</h1>
+    <p>指定されたポーズで落ちてくるオブジェクトをキャッチしよう！</p>
+    <button id="start-btn">▶ ゲームスタート</button>
+  </div>
+
+  <div id="gameover-screen">
+    <h1>GAME OVER</h1>
+    <div class="final-score" id="final-score-val">0</div>
+    <button id="retry-btn">もう一度プレイ</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script>
+// ================================================================
+//  設定
+// ================================================================
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbyaHI9mc9NDa571Xuv8az4gGs5-qmoWzhPCHvNqpuOAKL0vtp0DNc1WUPAPbU7CAs-H/exec';
+
+// ================================================================
+//  グローバル状態
+// ================================================================
+let gestureDefs   = [];   // スプシから取得した有効なジェスチャー定義
+let showSkeleton  = true;
+let audioUnlocked = false;
+let gameSettings  = { initialTime: 60, maxFallSpeed: 20, speedUpRate: 5 };
+
+let score            = 0;
+let currentSpeedBuff = 0;
+let timeLeft          = 60;
+let gameRunning       = false;
+let timerInterval     = null;
+let spawnInterval     = null;
+
+let fallingObjects = []; // { def, x, y, size, el, caught }
+let objIdCounter   = 0;
+
+let latestHands = []; // [{ lms, handedness, bounds }]
+
+// ================================================================
+//  DOM
+// ================================================================
+const videoEl     = document.getElementById('video');
+const canvasEl    = document.getElementById('skeleton-canvas');
+const ctx         = canvasEl.getContext('2d');
+const scene       = document.getElementById('scene');
+const hudStatus   = document.getElementById('hud-status');
+const noCameraEl  = document.getElementById('no-camera');
+const startScreen = document.getElementById('start-screen');
+const startBtn    = document.getElementById('start-btn');
+const gameoverEl  = document.getElementById('gameover-screen');
+const retryBtn    = document.getElementById('retry-btn');
+const scoreVal    = document.getElementById('score-val');
+const timerVal    = document.getElementById('timer-val');
+const timerBox    = document.getElementById('timer-box');
+const buffVal     = document.getElementById('buff-val');
+const finalScoreVal = document.getElementById('final-score-val');
+
+function resizeCanvas(){ canvasEl.width = window.innerWidth; canvasEl.height = window.innerHeight; }
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ================================================================
+//  スタート／リトライ
+// ================================================================
+startBtn.addEventListener('click', () => {
+  audioUnlocked = true;
+  startScreen.style.display = 'none';
+  const dummy = new Audio(); dummy.play().catch(()=>{});
+  startGame();
+});
+retryBtn.addEventListener('click', () => {
+  gameoverEl.style.display = 'none';
+  startGame();
+});
+
+function startGame() {
+  score = 0;
+  currentSpeedBuff = 0;
+  timeLeft = gameSettings.initialTime;
+  gameRunning = true;
+  clearAllFallingObjects();
+  updateHud();
+
+  clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    timeLeft -= 1;
+    if (timeLeft <= 0) { timeLeft = 0; updateHud(); endGame(); return; }
+    updateHud();
+  }, 1000);
+
+  clearInterval(spawnInterval);
+  spawnInterval = setInterval(spawnObject, 1400);
+}
+
+function endGame() {
+  gameRunning = false;
+  clearInterval(timerInterval);
+  clearInterval(spawnInterval);
+  clearAllFallingObjects();
+  finalScoreVal.textContent = Math.round(score);
+  gameoverEl.style.display = 'flex';
+}
+
+function updateHud() {
+  scoreVal.textContent = Math.round(score);
+  timerVal.textContent = timeLeft + 's';
+  timerBox.classList.toggle('warn', timeLeft <= 10);
+  buffVal.textContent = '+' + currentSpeedBuff.toFixed(1);
+}
+
+// ================================================================
+//  GAS 設定取得
+// ================================================================
+async function fetchConfig() {
+  if (!GAS_URL || GAS_URL.indexOf('YOUR_DEPLOY_ID') !== -1) return;
+  try {
+    const res  = await fetch(GAS_URL, { cache: 'no-store' });
+    const data = await res.json();
+    if (data.error) { console.warn('GAS error:', data.error); return; }
+    applyConfig(data, 'spreadsheet');
+    hudStatus.textContent = '設定取得済 (' + data.enabled + '件有効)';
+  } catch (e) {
+    console.error(e);
+    hudStatus.textContent = 'GAS接続エラー';
+  }
+}
+
+function applyConfig(data, source) {
+  if (source === 'admin' && data.showSkeletonOverride !== undefined) {
+    showSkeleton = data.showSkeletonOverride;
+  } else if (source === 'spreadsheet') {
+    showSkeleton = !!data.showSkeleton;
+  }
+  canvasEl.style.display = showSkeleton ? 'block' : 'none';
+
+  if (data.gestures !== undefined) {
+    gestureDefs = data.gestures.filter(g => g.enabled);
+  }
+  if (data.gameSettings) {
+    gameSettings = {
+      initialTime : data.gameSettings.initialTime  || 60,
+      maxFallSpeed: data.gameSettings.maxFallSpeed || 20,
+      speedUpRate : data.gameSettings.speedUpRate  || 5,
+    };
+    if (!gameRunning) timeLeft = gameSettings.initialTime;
+  }
+}
+
+const channel = new BroadcastChannel('hand-gesture-channel');
+channel.onmessage = (e) => {
+  if (e.data && e.data.type === 'config') applyConfig(e.data.payload, 'admin');
+};
+
+// ================================================================
+//  出現頻度（%）に基づく重み付き抽選
+// ================================================================
+function pickWeightedGesture() {
+  const total = gestureDefs.reduce((sum, g) => sum + (g.frequency || 0), 0);
+  if (total <= 0) {
+    // 全て頻度0の場合は均等抽選にフォールバック
+    return gestureDefs[Math.floor(Math.random() * gestureDefs.length)];
+  }
+  let r = Math.random() * total;
+  for (const g of gestureDefs) {
+    r -= (g.frequency || 0);
+    if (r <= 0) return g;
+  }
+  return gestureDefs[gestureDefs.length - 1];
+}
+
+// ================================================================
+//  オブジェクトのスポーン・落下
+// ================================================================
+function spawnObject() {
+  if (!gameRunning || !gestureDefs.length) return;
+  const def = pickWeightedGesture();
+
+  let el;
+  if (def.mediaType === 'video') {
+    el = document.createElement('video');
+    el.autoplay = true; el.loop = true; el.muted = true; el.playsInline = true;
+    el.setAttribute('playsinline','');
+  } else {
+    el = document.createElement('img');
+  }
+  el.className = 'fall-object';
+  el.src = def.mediaUrl;
+
+  const size = def.size || 90;
+  const x    = Math.random() * (window.innerWidth - size);
+  el.style.width  = size + 'px';
+  el.style.height = size + 'px';
+  el.style.left   = x + 'px';
+  el.style.top    = '-' + size + 'px';
+  scene.appendChild(el);
+
+  fallingObjects.push({
+    id: objIdCounter++, def, x, y: -size, size, el, caught: false
+  });
+}
+
+function clearAllFallingObjects() {
+  fallingObjects.forEach(o => o.el.remove());
+  fallingObjects = [];
+}
+
+// 実際の落下速度計算（初期速度 + バフ、上限キャップ）
+function actualFallSpeed(def) {
+  return Math.min(def.fallSpeed + currentSpeedBuff, gameSettings.maxFallSpeed);
+}
+
+function updateFallingObjects() {
+  if (!gameRunning) return;
+  const toRemove = [];
+
+  for (const obj of fallingObjects) {
+    if (obj.caught) continue;
+    obj.y += actualFallSpeed(obj.def);
+    obj.el.style.top = obj.y + 'px';
+
+    // 画面外に落下 → すり抜け（消滅、ポイントなし）
+    if (obj.y > window.innerHeight) {
+      toRemove.push(obj);
+      continue;
+    }
+
+    // 手との当たり判定
+    const objCenter = { x: obj.x + obj.size/2, y: obj.y + obj.size/2 };
+    for (const hand of latestHands) {
+      const dx = hand.bounds.cx - objCenter.x;
+      const dy = hand.bounds.cy - objCenter.y;
+      const distTouch = Math.hypot(dx, dy);
+      const touchRadius = (obj.size/2) + (hand.bounds.size/2) * 0.5;
+
+      if (distTouch < touchRadius) {
+        if (matchGesture(hand.lms, hand.handedness, obj.def)) {
+          // キャッチ成功
+          obj.caught = true;
+          score += obj.def.point;
+          currentSpeedBuff += obj.def.point * (gameSettings.speedUpRate / 100);
+          updateHud();
+          if (obj.def.audioUrl) playAudio(obj.def.audioUrl);
+          toRemove.push(obj);
+          break;
+        }
+        // ポーズ不一致 → キャッチできずすり抜け続行
+      }
+    }
+  }
+
+  if (toRemove.length) {
+    toRemove.forEach(o => o.el.remove());
+    fallingObjects = fallingObjects.filter(o => !toRemove.includes(o));
+  }
+}
+
+// ================================================================
+//  音声
+// ================================================================
+const audioPool = {};
+function getAudio(url) {
+  if (!url) return null;
+  if (!audioPool[url]) { audioPool[url] = new Audio(url); audioPool[url].preload = 'auto'; }
+  return audioPool[url];
+}
+function playAudio(url) {
+  if (!audioUnlocked || !url) return;
+  const audio = getAudio(url);
+  if (!audio) return;
+  audio.currentTime = 0;
+  audio.play().catch(e => console.warn('audio play failed:', e));
+}
+
+// ================================================================
+//  指の曲げ伸ばし判定（高精度版：直線度 + 親指離脱度）
+// ================================================================
+const FINGER_LMS = {
+  index : [5,6,7,8],
+  middle: [9,10,11,12],
+  ring  : [13,14,15,16],
+  pinky : [17,18,19,20],
+};
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+function fingerStraightness(lms, finger) {
+  const [mcp,pip,dip,tip] = FINGER_LMS[finger].map(i => lms[i]);
+  const straight = dist(mcp, tip);
+  const chain    = dist(mcp,pip) + dist(pip,dip) + dist(dip,tip);
+  if (chain === 0) return 1;
+  return straight / chain;
+}
+function isExtendedFinger(lms, finger) {
+  const s = fingerStraightness(lms, finger);
+  if (s >= 0.90) return true;
+  if (s <  0.75) return false;
+  return null;
+}
+function isExtendedThumb(lms) {
+  const tip = lms[4], idx = lms[5], pin = lms[17], palm = lms[9];
+  const palmWidth = dist(idx, pin);
+  if (palmWidth === 0) return null;
+
+  const lx = pin.x - idx.x, ly = pin.y - idx.y;
+  const len = Math.hypot(lx, ly);
+  const nx = -ly/len, ny = lx/len;
+
+  const tx = tip.x - idx.x, ty = tip.y - idx.y;
+  const proj = (tx*lx + ty*ly) / (len*len);
+  const perpDist = Math.abs(tx*nx + ty*ny);
+
+  const insideLine = proj >= -0.1 && proj <= 1.1;
+  const nearPalm   = perpDist / palmWidth < 0.5;
+  const distToCenter = dist(tip, palm);
+  const isClose = distToCenter / palmWidth < 0.7;
+
+  if (insideLine && nearPalm) return false;
+  if (isClose) return false;
+  return true;
+}
+function isExtended(lms, finger) {
+  if (finger === 'thumb') {
+    const r = isExtendedThumb(lms);
+    return r !== null ? r : true;
+  }
+  const r = isExtendedFinger(lms, finger);
+  return r !== null ? r : true;
+}
+function fingerOk(lms, finger, cond) {
+  if (cond === 'Ignore') return true;
+  return cond === 'Extended' ? isExtended(lms, finger) : !isExtended(lms, finger);
+}
+function matchGesture(lms, handedness, gesture) {
+  if (gesture.targetHand !== 'Both') {
+    const corrected = handedness.label === 'Right' ? 'Left' : 'Right';
+    if (handedness.score < 0.7) return false;
+    if (corrected !== gesture.targetHand) return false;
+  }
+  for (const [f, cond] of Object.entries(gesture.fingers)) {
+    if (!fingerOk(lms, f, cond)) return false;
+  }
+  return true;
+}
+
+// ================================================================
+//  手のバウンディング（ミラー補正済み画面座標）
+// ================================================================
+function getHandBounds(lms) {
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for (const lm of lms) {
+    const sx = (1 - lm.x) * canvasEl.width;
+    const sy = lm.y * canvasEl.height;
+    if (sx<minX) minX=sx; if (sy<minY) minY=sy;
+    if (sx>maxX) maxX=sx; if (sy>maxY) maxY=sy;
+  }
+  const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+  const size=Math.max((maxX-minX)*1.7,(maxY-minY)*1.7,60);
+  return { cx, cy, size };
+}
+
+// ================================================================
+//  MediaPipe結果コールバック
+// ================================================================
+function onResults(results) {
+  ctx.clearRect(0,0,canvasEl.width,canvasEl.height);
+  const handCount = results.multiHandLandmarks ? results.multiHandLandmarks.length : 0;
+  latestHands = [];
+
+  for (let hi=0; hi<handCount; hi++) {
+    const lms = results.multiHandLandmarks[hi];
+    const handedness = results.multiHandedness[hi];
+    const bounds = getHandBounds(lms);
+    latestHands.push({ lms, handedness, bounds });
+
+    if (showSkeleton) {
+      ctx.save();
+      ctx.scale(-1,1);
+      ctx.translate(-canvasEl.width, 0);
+      drawConnectors(ctx, lms, HAND_CONNECTIONS, { color:'rgba(0,212,255,0.45)', lineWidth:2 });
+      drawLandmarks(ctx, lms, { color:'#00d4ff', fillColor:'rgba(0,0,0,0.7)', lineWidth:1, radius:3 });
+      ctx.restore();
+    }
+  }
+
+  updateFallingObjects();
+}
+
+// ================================================================
+//  MediaPipe Hands 初期化
+// ================================================================
+const hands = new Hands({ locateFile: f => 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/' + f });
+hands.setOptions({ maxNumHands:10, modelComplexity:1, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
+hands.onResults(onResults);
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width:{ideal:1280}, height:{ideal:720}, facingMode:'user' }
+    });
+    videoEl.srcObject = stream;
+    videoEl.onloadedmetadata = () => {
+      noCameraEl.style.display = 'none';
+      const cam = new Camera(videoEl, {
+        onFrame: async () => { await hands.send({ image: videoEl }); },
+        width: 1280, height: 720
+      });
+      cam.start();
+      hudStatus.textContent = 'トラッキング中';
+    };
+  } catch (err) {
+    console.error(err);
+    noCameraEl.querySelector('p').textContent = 'カメラへのアクセスが拒否されました';
+    hudStatus.textContent = 'カメラエラー';
+  }
+}
+
+startCamera();
+fetchConfig();
+</script>
+</body>
+</html>
